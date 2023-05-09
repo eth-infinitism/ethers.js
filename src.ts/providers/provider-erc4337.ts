@@ -21,7 +21,7 @@ function toJson (value: null | bigint): null | string {
 
 export interface UserOperationInterface {
   sender: string
-  nonce: string
+  nonce: bigint
   initCode: string
   callData: string
   maxFeePerGas: bigint
@@ -38,7 +38,7 @@ export interface UserOperationInterface {
 
 export class UserOperation implements UserOperationInterface {
   sender!: string
-  nonce!: string
+  nonce!: bigint
   initCode!: string
   callData!: string
   maxFeePerGas!: bigint
@@ -56,6 +56,7 @@ export class UserOperation implements UserOperationInterface {
 
   toJSON (): any {
     const {
+      nonce,
       maxFeePerGas,
       maxPriorityFeePerGas,
       callGasLimit,
@@ -64,6 +65,7 @@ export class UserOperation implements UserOperationInterface {
     } = this
     return {
       ...this,
+      nonce: toJson(nonce),
       maxFeePerGas: toJson(maxFeePerGas),
       maxPriorityFeePerGas: toJson(maxPriorityFeePerGas),
       callGasLimit: toJson(callGasLimit),
@@ -97,21 +99,19 @@ export interface Erc4337WalletInfo {
   // as defined by drortirosh
   getAddress: () => Promise<string>
   getInitCode: () => Promise<string>
-  getNonce: () => Promise<string>
+  getNonce: () => Promise<bigint>
   encodeCalldata: (_: UserOperationCalldata) => Promise<string>
   encodeBatchCalldata: (_: Array<UserOperationCalldata>) => Promise<string>
-  getSignatureForEstimateGas: () => Promise<string>
+  getSignatureForEstimateGas: (_: UserOperation) => Promise<string>
   signUserOp: (_: UserOperation) => Promise<string>
 
   // alexf - additions
 
   // if not supported - throw exception
   signEip1271Message: (_: string) => Promise<string>
-  // the wallet decides if the fields passed into the callback are sufficient; if no - throw exception
-  getPaymasterAndData: (_: Partial<UserOperation>) => Promise<string>
 
-  // getPreVerificationGas: () => Promise<string>
-  // getVerificationGasLimit: () => Promise<string>
+  getPaymasterAndData: (_: Partial<UserOperation>) => Promise<string>
+  getPaymasterAndDataForEstimateGas: (_: Partial<UserOperation>) => Promise<string>
 }
 
 /**
@@ -194,6 +194,14 @@ export class Erc4337Provider extends AbstractProvider {
       })
     }
     await this.verifyEntryPointSupported(entryPoint)
+
+    userOperation.callGasLimit = 0n
+    userOperation.preVerificationGas = 0n
+    userOperation.verificationGasLimit = 0n
+    if (userOperation.paymasterAndData == null) {
+      userOperation.paymasterAndData = await this.walletInfo.getPaymasterAndDataForEstimateGas(userOperation)
+    }
+    userOperation.signature = await this.walletInfo.getSignatureForEstimateGas(userOperation)
     return this.jsonRpcProvider.send('eth_estimateUserOperationGas', [userOperation.toJSON(), entryPoint])
   }
 
@@ -217,7 +225,7 @@ export class Erc4337Provider extends AbstractProvider {
 }
 
 export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
-  isCodeDeployed?: boolean
+  _isCodeDeployed?: boolean
 
   constructor (
     readonly walletInfo: Erc4337WalletInfo,
@@ -265,15 +273,25 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
     return userOperationGasEstimation.callGasLimit
   }
 
+  // TODO: set to true after initial transaction is mined
+  async isCodeDeployed (): Promise<boolean> {
+    if (this._isCodeDeployed == null) {
+      const address = await this.getAddress()
+      const code = await this.provider.getCode(address)
+      this._isCodeDeployed = !(code === '' || code === '0x')
+    }
+    return this._isCodeDeployed
+  }
+
   async getInitCode () {
-    if (this.isCodeDeployed) {
-      return ''
+    if (await this.isCodeDeployed()) {
+      return '0x'
     } else {
       return this.walletInfo.getInitCode()
     }
   }
 
-  async getErc4337Nonce (): Promise<string> {
+  async getErc4337Nonce (): Promise<bigint> {
     return await this.walletInfo.getNonce()
   }
 
@@ -318,15 +336,21 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
       maxPriorityFeePerGas
     })
 
-    const {
-      callGasLimit,
-      preVerificationGas,
-      verificationGasLimit
-    } = await this.provider.estimateUserOperationGas(userOperation)
+    if (
+      userOperation.callGasLimit == null ||
+      userOperation.preVerificationGas == null ||
+      userOperation.verificationGasLimit == null
+    ) {
+      const {
+        callGasLimit,
+        preVerificationGas,
+        verificationGasLimit
+      } = await this.provider.estimateUserOperationGas(userOperation)
+      userOperation.callGasLimit = callGasLimit
+      userOperation.preVerificationGas = preVerificationGas
+      userOperation.verificationGasLimit = verificationGasLimit
+    }
 
-    userOperation.callGasLimit = callGasLimit
-    userOperation.preVerificationGas = preVerificationGas
-    userOperation.verificationGasLimit = verificationGasLimit
     userOperation.paymasterAndData = await this.getPaymasterAndData(userOperation)
     return userOperation
   }
