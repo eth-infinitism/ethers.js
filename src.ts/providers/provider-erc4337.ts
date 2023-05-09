@@ -1,13 +1,20 @@
 import {
   AbstractProvider,
   AbstractSigner,
+  JsonRpcProvider,
   Networkish,
   Provider,
   Signer,
   TransactionRequest,
+  TransactionResponse,
   TypedDataDomain,
+  TypedDataEncoder,
   TypedDataField,
-  assert, resolveAddress, TransactionResponse, toBigInt, TypedDataEncoder, hashMessage, assertArgument
+  assert,
+  assertArgument,
+  hashMessage,
+  resolveAddress,
+  toBigInt
 } from '../ethers'
 
 export interface UserOperation {
@@ -23,6 +30,17 @@ export interface UserOperation {
 
   signature?: string
   paymasterAndData?: string
+}
+
+export interface UserOperationGasEstimation {
+  // gas overhead of this UserOperation
+  preVerificationGas: bigint
+
+  // actual gas used by the validation of this UserOperation
+  verificationGasLimit: bigint
+
+  // value used by inner account execution
+  callGasLimit: bigint
 }
 
 type UserOpCalldata = {
@@ -55,25 +73,89 @@ export interface Erc4337WalletInfo {
   getVerificationGasLimit: () => Promise<string>
 }
 
+/**
+ * Connects to a {@link bundlerUrl} with a JsonRpcProvider
+ */
 export class Erc4337Provider extends AbstractProvider {
+  jsonRpcProvider: JsonRpcProvider
   signer: Erc4337Signer
 
+  supportedEntryPoints?: string[]
+
   constructor (
-    readonly origProvider: Provider,
+    readonly bundlerUrl: string,
     readonly walletInfo: Erc4337WalletInfo,
     _network?: 'any' | Networkish
   ) {
     super(_network)
+    this.jsonRpcProvider = new JsonRpcProvider(bundlerUrl)
     this.signer = new Erc4337Signer(walletInfo, this)
   }
 
+  async send (method: string, params: Array<any> | Record<string, any>): Promise<any> {
+    // TODO: intercept direct sending of methods ERC-4337 overrides
+    return this.jsonRpcProvider.send(method, params)
+  }
+
   async getSigner (address?: number | string): Promise<Erc4337Signer> {
-    // todo: check this address is controlled by the signer
+    if (address != null) {
+      if (typeof address === 'number') {
+        assert(address === 0, 'ERC-4337 Signer only controls one address', 'UNSUPPORTED_OPERATION', {
+          operation: 'provider.getSigner'
+        })
+      } else {
+        const signerAddress = await this.signer.getAddress()
+        assert(signerAddress.toLowerCase() === address.toLowerCase(),
+          'address mismatch', 'UNSUPPORTED_OPERATION')
+      }
+    }
     return this.signer
   }
 
   async estimateGas (_tx: TransactionRequest): Promise<bigint> {
-    return super.estimateGas(_tx)
+    assert(false, 'cannot estimate ERC-4337 UserOp gas without signer', 'UNSUPPORTED_OPERATION', {
+      operation: 'provider.estimateGas'
+    })
+  }
+
+  private async verifyEntryPointSupported (entryPoint: string): Promise<void> {
+    const supportedEntryPoints = await this.getSupportedEntryPoints()
+    const supported = supportedEntryPoints.map(it => it.toLowerCase()).includes(entryPoint.toLowerCase())
+    assert(supported, `the EntryPoint at ${entryPoint} is not supported by this bundler`, 'UNSUPPORTED_OPERATION', {
+      operation: 'provider.verifyEntryPointSupported'
+    })
+  }
+
+  // Modified ERC-4337 methods
+
+  async estimateUserOperationGas (userOperation: UserOperation, _entryPoint?: string): Promise<UserOperationGasEstimation> {
+    const supportedEntryPoints = await this.getSupportedEntryPoints()
+    let entryPoint = _entryPoint
+    if (entryPoint == null) {
+      if (supportedEntryPoints.length !== 1) {
+        assert(false, 'bundler supports multiple EntryPoints - must specify one to use', 'UNSUPPORTED_OPERATION', {
+          operation: 'provider.estimateGas'
+        })
+      }
+      entryPoint = this.supportedEntryPoints?.[0]
+      assert(entryPoint != null, 'bundler reported no supported EntryPoints - use different bundler URL', 'UNSUPPORTED_OPERATION', {
+        operation: 'provider.estimateGas'
+      })
+    }
+    await this.verifyEntryPointSupported(entryPoint)
+    return this.jsonRpcProvider.send('eth_estimateUserOperationGas', [userOperation, entryPoint])
+  }
+
+  async getSupportedEntryPoints (): Promise<string[]> {
+    return this.jsonRpcProvider.send('eth_supportedEntryPoints', [])
+  }
+
+  async getUserOperation (userOpHash: string): Promise<any> {
+    return this.jsonRpcProvider.send('eth_getUserOperationByHash', [userOpHash])
+  }
+
+  async getUserOperationReceipt (userOpHash: string): Promise<any> {
+    return this.jsonRpcProvider.send('eth_getUserOperationReceipt', [userOpHash])
   }
 }
 
@@ -108,6 +190,10 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
     return this.walletInfo.encodeCalldata({ to, data, value })
   }
 
+  /**
+   * Note: this function may be counter-intuitive as it drop the verification gas info from the returned value.
+   * It may be useful if the app needs an inner call gas limit estimation. TBD if this needs to be removed.
+   */
   async estimateGas (tx: TransactionRequest): Promise<bigint> {
     const address = await this.getAddress()
 
@@ -117,7 +203,9 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
       assertArgument(from.toLowerCase() === address.toLowerCase(),
         'transaction from mismatch', 'tx.from', from)
     }
-    return super.estimateGas(Object.assign({}, tx, { from: address }))
+    const userOperation = await this.populateUserOperation(tx)
+    const userOperationGasEstimation = await this.provider.estimateUserOperationGas(userOperation)
+    return userOperationGasEstimation.callGasLimit
   }
 
   async getInitCode () {
@@ -183,13 +271,34 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
     return userOperation
   }
 
+  /**
+   * This function returns a 'signed transaction' that can be passed to 'eth_sendRawTransaction' RPC endpoint.
+   * There is no meaningful 'signed transaction' equivalent in ERC-4337.
+   */
   async signTransaction (tx: TransactionRequest): Promise<string> {
-    const userOperation = await this.populateUserOperation(tx)
-    return await this.walletInfo.signUserOp(userOperation)
+    assert(false, 'cannot sign regular transaction with an Erc4337Signer', 'UNSUPPORTED_OPERATION', {
+      operation: 'signer.signTransaction'
+    })
   }
 
   async sendTransaction (tx: TransactionRequest): Promise<TransactionResponse> {
-    return super.sendTransaction(tx)
+    const userOperation = await this.populateUserOperation(tx)
+    userOperation.signature = await this.signUserOperation(userOperation)
+    return this.sendUserOperation(userOperation)
+  }
+
+  async sendUserOperation (userOperation: UserOperation): Promise<TransactionResponse> {
+    assert(userOperation.signature != null, 'passed UserOperation is not signed', 'UNSUPPORTED_OPERATION', {
+      operation: 'signer.sendUserOperation'
+    })
+    return this.provider.send('eth_sendUserOperation', userOperation)
+  }
+
+  async signUserOperation (userOperation: UserOperation): Promise<string> {
+    assert(userOperation.signature == null, 'passed UserOperation already signed', 'UNSUPPORTED_OPERATION', {
+      operation: 'signer.signUserOperation'
+    })
+    return await this.walletInfo.signUserOp(userOperation)
   }
 
   // copied from 'base-wallet.ts' with signature delegated to the 'WalletInfo'
@@ -198,24 +307,17 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
   }
 
   async signTypedData (domain: TypedDataDomain, types: Record<string, Array<TypedDataField>>, value: Record<string, any>): Promise<string> {
-    // Populate any ENS names
     const populated = await TypedDataEncoder.resolveNames(domain, types, value, async (name: string) => {
-      // @TODO: this should use resolveName; addresses don't
-      //        need a provider
-
       assert(this.provider != null, 'cannot resolve ENS names without a provider', 'UNSUPPORTED_OPERATION', {
         operation: 'resolveName',
         info: { name }
       })
-
       const address = await this.provider.resolveName(name)
       assert(address != null, 'unconfigured ENS name', 'UNCONFIGURED_NAME', {
         value: name
       })
-
       return address
     })
-
     return this.walletInfo.signEip1271Message(TypedDataEncoder.hash(populated.domain, types, populated.value))
   }
 
