@@ -67,6 +67,8 @@ export {
     FallbackProvider,
     JsonRpcApiProvider, JsonRpcProvider, JsonRpcSigner,
 
+    Erc4337Provider, Erc4337Signer, Erc4337WalletInfo, UserOperation, UserOperationGasEstimation, UserOperationCalldata,
+
     BrowserProvider,
 
     AlchemyProvider, AnkrProvider, CloudflareProvider, EtherscanProvider,

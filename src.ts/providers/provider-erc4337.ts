@@ -1,35 +1,32 @@
-import {
-  AbstractProvider,
-  AbstractSigner,
-  JsonRpcProvider,
-  Networkish,
-  Provider,
-  Signer,
-  TransactionRequest,
-  TransactionResponse,
-  TypedDataDomain,
-  TypedDataEncoder,
-  TypedDataField,
-  assert,
-  assertArgument,
-  hashMessage,
-  resolveAddress,
-  toBigInt
-} from '../ethers'
+import type { Networkish } from './network.js'
+import type { Provider, TransactionRequest, TransactionResponse } from './provider.js'
+import type { Signer } from './signer.js'
+import type { TypedDataDomain, TypedDataField } from '../hash/index.js'
+
+import { TypedDataEncoder, hashMessage } from '../hash/index.js'
+
+import { AbstractProvider } from './abstract-provider.js'
+import { AbstractSigner } from './abstract-signer.js'
+import { JsonRpcProvider } from './provider-jsonrpc.js'
+import { assert, assertArgument } from '../utils/errors.js'
+import { resolveAddress } from '../address/checks.js'
+import { toBigInt } from '../utils/maths.js'
 
 export interface UserOperation {
   sender: string
   nonce: string
   initCode: string
   callData: string
-  callGasLimit: bigint
-  verificationGasLimit: string
-  preVerificationGas: string
   maxFeePerGas: bigint
   maxPriorityFeePerGas: bigint
 
-  signature?: string
+  callGasLimit?: bigint
+  verificationGasLimit?: bigint
+  preVerificationGas?: bigint
+
   paymasterAndData?: string
+
+  signature?: string
 }
 
 export interface UserOperationGasEstimation {
@@ -43,7 +40,7 @@ export interface UserOperationGasEstimation {
   callGasLimit: bigint
 }
 
-type UserOpCalldata = {
+export interface UserOperationCalldata {
   to: string
   data?: string | null
   value?: string | null
@@ -57,8 +54,8 @@ export interface Erc4337WalletInfo {
   getAddress: () => Promise<string>
   getInitCode: () => Promise<string>
   getNonce: () => Promise<string>
-  encodeCalldata: (_: UserOpCalldata) => Promise<string>
-  encodeBatchCalldata: (_: Array<UserOpCalldata>) => Promise<string>
+  encodeCalldata: (_: UserOperationCalldata) => Promise<string>
+  encodeBatchCalldata: (_: Array<UserOperationCalldata>) => Promise<string>
   getSignatureForEstimateGas: () => Promise<string>
   signUserOp: (_: UserOperation) => Promise<string>
 
@@ -69,8 +66,8 @@ export interface Erc4337WalletInfo {
   // the wallet decides if the fields passed into the callback are sufficient; if no - throw exception
   getPaymasterAndData: (_: Partial<UserOperation>) => Promise<string>
 
-  getPreVerificationGas: () => Promise<string>
-  getVerificationGasLimit: () => Promise<string>
+  // getPreVerificationGas: () => Promise<string>
+  // getVerificationGasLimit: () => Promise<string>
 }
 
 /**
@@ -224,22 +221,19 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
     return this.walletInfo.getPaymasterAndData(userOperation)
   }
 
-  async getPreVerificationGas (): Promise<string> {
-    return this.walletInfo.getPreVerificationGas()
-  }
-
-  async getVerificationGasLimit (): Promise<string> {
-    return this.walletInfo.getVerificationGasLimit()
-  }
+  // async getPreVerificationGas (): Promise<string> {
+  //   return this.walletInfo.getPreVerificationGas()
+  // }
+  //
+  // async getVerificationGasLimit (): Promise<string> {
+  //   return this.walletInfo.getVerificationGasLimit()
+  // }
 
   async populateUserOperation (tx: TransactionRequest): Promise<UserOperation> {
     const callData = await this.encodeCalldata(tx)
-    const callGasLimit = await this.estimateGas(tx)
     const initCode = await this.getInitCode()
     const nonce = await this.getErc4337Nonce()
-    const preVerificationGas = await this.getPreVerificationGas()
     const sender = await this.getAddress()
-    const verificationGasLimit = await this.getVerificationGasLimit()
 
     let maxFeePerGas: bigint
     let maxPriorityFeePerGas: bigint
@@ -257,16 +251,22 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
 
     const userOperation: UserOperation = {
       callData,
-      callGasLimit,
       initCode,
       nonce,
-      preVerificationGas,
       sender,
-      verificationGasLimit,
       maxFeePerGas,
       maxPriorityFeePerGas
     }
 
+    const {
+      callGasLimit,
+      preVerificationGas,
+      verificationGasLimit
+    } = await this.provider.estimateUserOperationGas(userOperation)
+
+    userOperation.callGasLimit = callGasLimit
+    userOperation.preVerificationGas = preVerificationGas
+    userOperation.verificationGasLimit = verificationGasLimit
     userOperation.paymasterAndData = await this.getPaymasterAndData(userOperation)
     return userOperation
   }
