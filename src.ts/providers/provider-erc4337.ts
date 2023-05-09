@@ -5,14 +5,21 @@ import type { TypedDataDomain, TypedDataField } from '../hash/index.js'
 
 import { TypedDataEncoder, hashMessage } from '../hash/index.js'
 
-import { AbstractProvider } from './abstract-provider.js'
+import { AbstractProvider, PerformActionRequest } from './abstract-provider.js'
 import { AbstractSigner } from './abstract-signer.js'
 import { JsonRpcProvider } from './provider-jsonrpc.js'
 import { assert, assertArgument } from '../utils/errors.js'
 import { resolveAddress } from '../address/checks.js'
 import { toBigInt } from '../utils/maths.js'
+import { Network } from './network.js'
 
-export interface UserOperation {
+// copied from 'provider.ts'
+function toJson (value: null | bigint): null | string {
+  if (value == null) { return null }
+  return value.toString()
+}
+
+export interface UserOperationInterface {
   sender: string
   nonce: string
   initCode: string
@@ -27,6 +34,43 @@ export interface UserOperation {
   paymasterAndData?: string
 
   signature?: string
+}
+
+export class UserOperation implements UserOperationInterface {
+  sender!: string
+  nonce!: string
+  initCode!: string
+  callData!: string
+  maxFeePerGas!: bigint
+  maxPriorityFeePerGas!: bigint
+  callGasLimit!: bigint
+  verificationGasLimit!: bigint
+  preVerificationGas!: bigint
+  paymasterAndData!: string
+  signature!: string
+
+  constructor (userOperation: UserOperationInterface) {
+    // TODO: do it like the rest of classes do it, with 'defineProperty'
+    Object.assign(this, userOperation)
+  }
+
+  toJSON (): any {
+    const {
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      callGasLimit,
+      verificationGasLimit,
+      preVerificationGas
+    } = this
+    return {
+      ...this,
+      maxFeePerGas: toJson(maxFeePerGas),
+      maxPriorityFeePerGas: toJson(maxPriorityFeePerGas),
+      callGasLimit: toJson(callGasLimit),
+      verificationGasLimit: toJson(verificationGasLimit),
+      preVerificationGas: toJson(preVerificationGas),
+    }
+  }
 }
 
 export interface UserOperationGasEstimation {
@@ -85,13 +129,23 @@ export class Erc4337Provider extends AbstractProvider {
     _network?: 'any' | Networkish
   ) {
     super(_network)
-    this.jsonRpcProvider = new JsonRpcProvider(bundlerUrl)
+    this.jsonRpcProvider = new JsonRpcProvider(bundlerUrl, _network, { batchMaxCount: 1 })
     this.signer = new Erc4337Signer(walletInfo, this)
   }
 
   async send (method: string, params: Array<any> | Record<string, any>): Promise<any> {
     // TODO: intercept direct sending of methods ERC-4337 overrides
     return this.jsonRpcProvider.send(method, params)
+  }
+
+  // override AbstractProvider stub
+  _detectNetwork (): Promise<Network> {
+    return this.jsonRpcProvider._detectNetwork()
+  }
+
+  // override AbstractProvider stub
+  async _perform<T = any> (req: PerformActionRequest): Promise<T> {
+    return this.jsonRpcProvider._perform(req)
   }
 
   async getSigner (address?: number | string): Promise<Erc4337Signer> {
@@ -134,17 +188,23 @@ export class Erc4337Provider extends AbstractProvider {
           operation: 'provider.estimateGas'
         })
       }
-      entryPoint = this.supportedEntryPoints?.[0]
+      entryPoint = supportedEntryPoints?.[0]
       assert(entryPoint != null, 'bundler reported no supported EntryPoints - use different bundler URL', 'UNSUPPORTED_OPERATION', {
         operation: 'provider.estimateGas'
       })
     }
     await this.verifyEntryPointSupported(entryPoint)
-    return this.jsonRpcProvider.send('eth_estimateUserOperationGas', [userOperation, entryPoint])
+    return this.jsonRpcProvider.send('eth_estimateUserOperationGas', [userOperation.toJSON(), entryPoint])
   }
 
   async getSupportedEntryPoints (): Promise<string[]> {
-    return this.jsonRpcProvider.send('eth_supportedEntryPoints', [])
+    // there is no reason to support bundler changing the supported EntryPoints list at this point
+    if (this.supportedEntryPoints != null) {
+      return this.supportedEntryPoints
+    }
+    const supportedEntryPoints = await this.jsonRpcProvider.send('eth_supportedEntryPoints', [])
+    this.supportedEntryPoints = supportedEntryPoints
+    return supportedEntryPoints
   }
 
   async getUserOperation (userOpHash: string): Promise<any> {
@@ -249,14 +309,14 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
       maxPriorityFeePerGas = feeData.maxPriorityFeePerGas!
     }
 
-    const userOperation: UserOperation = {
+    const userOperation = new UserOperation({
       callData,
       initCode,
       nonce,
       sender,
       maxFeePerGas,
       maxPriorityFeePerGas
-    }
+    })
 
     const {
       callGasLimit,
@@ -291,7 +351,7 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
     assert(userOperation.signature != null, 'passed UserOperation is not signed', 'UNSUPPORTED_OPERATION', {
       operation: 'signer.sendUserOperation'
     })
-    return this.provider.send('eth_sendUserOperation', userOperation)
+    return this.provider.send('eth_sendUserOperation', userOperation.toJSON())
   }
 
   async signUserOperation (userOperation: UserOperation): Promise<string> {

@@ -33,18 +33,19 @@ const walletInfo: Erc4337WalletInfo = {
 
 describe("Sends UserOperation", function() {
 
-    const wallet = new Wallet(<string>(process.env.FAUCET_PRIVATEKEY));
+    // const wallet = new Wallet(<string>(process.env.FAUCET_PRIVATEKEY));
 
     // const networkName = "goerli";
     for (const providerName of ['one']) {
         // const provider = getProvider(providerName, networkName);
-        const provider = new Erc4337Provider('', walletInfo)
+        const provider = new Erc4337Provider('https://api.stackup.sh/v1/node/99a0e25254fab0ddf2c0b37c2e92fc41b2442d3ba77e1c6bb6b4fd998943baf9', walletInfo)
         if (provider == null) { continue; }
 
         it(`tests sending: ${ providerName }`, async function() {
             this.timeout(180000);
 
-            const w = wallet.connect(provider);
+            // const w = wallet.connect(provider);
+            const signer = await provider.getSigner()
 
             const dustAddr = Wallet.createRandom().address;
 
@@ -52,7 +53,7 @@ describe("Sends UserOperation", function() {
             let tx: null | TransactionResponse = null;
             for (let i = 0; i < 10; i++) {
                 try {
-                    tx = await w.sendTransaction({
+                    tx = await signer.sendTransaction({
                         to: dustAddr,
                         value: 42,
                         type: 2
