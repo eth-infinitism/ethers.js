@@ -2,12 +2,14 @@ import assert from "assert";
 
 import {
   Contract,
+  ContractRunner,
   Erc4337Provider,
   Erc4337WalletInfo,
+  JsonRpcProvider,
   UserOperation,
   UserOperationCalldata,
   Wallet,
-  isError, ContractRunner, JsonRpcProvider
+  isError
 } from '../index.js'
 
 import type { TransactionResponse } from "../index.js";
@@ -161,7 +163,7 @@ const getUserOpHashAbi = {
     "type": "function"
 }
 
-const MUMBAI_SIMPLE_ACCOUNT = '0x4424fFF6cfaA1c1A51975BE65F371e10276ff5BB'
+const MUMBAI_SIMPLE_ACCOUNT = '0x0F48612d2517e47D72fEc92a2fc6fd64cA6816E0'
 const MUMBAI_ENTRY_POINT = '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789'
 
 class SampleWalletInfo implements Erc4337WalletInfo {
@@ -203,7 +205,11 @@ class SampleWalletInfo implements Erc4337WalletInfo {
 
     async signUserOp (userOperation: UserOperation): Promise<string> {
         const wallet = new Wallet(process.env.OWNER_PRIVATE_KEY!)
-        const userOpHash = await this.entryPoint.getUserOpHash(userOperation)
+        const address = await wallet.getAddress()
+        console.log('address', address)
+        const userOpCopy = Object.assign({}, userOperation, { signature: '0x' })
+        const userOpHash = await this.entryPoint.getUserOpHash(userOpCopy)
+        console.log('userOpHash', userOpHash)
         return wallet.signMessage(userOpHash)
     }
 
@@ -212,7 +218,7 @@ class SampleWalletInfo implements Erc4337WalletInfo {
     }
 
     getSignatureForEstimateGas (_: UserOperation): Promise<string> {
-        return Promise.resolve('0x')
+        return this.signUserOp(_)
     }
 
     getPaymasterAndDataForEstimateGas (_: Partial<UserOperation>): Promise<string> {

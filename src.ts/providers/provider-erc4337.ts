@@ -13,10 +13,14 @@ import { resolveAddress } from '../address/checks.js'
 import { toBigInt } from '../utils/maths.js'
 import { Network } from './network.js'
 
-// copied from 'provider.ts'
+// as seen in 'provider.ts' but using radix 16
 function toJson (value: null | bigint): null | string {
   if (value == null) { return null }
-  return value.toString()
+  if (typeof value === 'string') {
+    // todo: fix double "toJSON" calls
+    return value
+  }
+  return `0x${value.toString(16)}`
 }
 
 export interface UserOperationInterface {
@@ -80,7 +84,10 @@ export interface UserOperationGasEstimation {
   preVerificationGas: bigint
 
   // actual gas used by the validation of this UserOperation
-  verificationGasLimit: bigint
+  verificationGasLimit?: bigint
+
+  // TODO: currently Stackup still uses this name - fix
+  verificationGas?: bigint
 
   // value used by inner account execution
   callGasLimit: bigint
@@ -195,14 +202,16 @@ export class Erc4337Provider extends AbstractProvider {
     }
     await this.verifyEntryPointSupported(entryPoint)
 
-    userOperation.callGasLimit = 0n
+    userOperation.callGasLimit = 1000000n
     userOperation.preVerificationGas = 0n
-    userOperation.verificationGasLimit = 0n
+    userOperation.verificationGasLimit = 1000000n
+    let paymasterAndData = userOperation.paymasterAndData
     if (userOperation.paymasterAndData == null) {
-      userOperation.paymasterAndData = await this.walletInfo.getPaymasterAndDataForEstimateGas(userOperation)
+      paymasterAndData = await this.walletInfo.getPaymasterAndDataForEstimateGas(userOperation)
     }
-    userOperation.signature = await this.walletInfo.getSignatureForEstimateGas(userOperation)
-    return this.jsonRpcProvider.send('eth_estimateUserOperationGas', [userOperation.toJSON(), entryPoint])
+    const userOpCopy = new UserOperation(Object.assign({}, userOperation.toJSON(), { paymasterAndData }))
+    userOpCopy.signature = await this.walletInfo.getSignatureForEstimateGas(userOpCopy)
+    return this.jsonRpcProvider.send('eth_estimateUserOperationGas', [userOpCopy, entryPoint])
   }
 
   async getSupportedEntryPoints (): Promise<string[]> {
@@ -344,11 +353,11 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
       const {
         callGasLimit,
         preVerificationGas,
-        verificationGasLimit
+        verificationGas
       } = await this.provider.estimateUserOperationGas(userOperation)
       userOperation.callGasLimit = callGasLimit
       userOperation.preVerificationGas = preVerificationGas
-      userOperation.verificationGasLimit = verificationGasLimit
+      userOperation.verificationGasLimit = verificationGas!
     }
 
     userOperation.paymasterAndData = await this.getPaymasterAndData(userOperation)
@@ -368,14 +377,16 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
   async sendTransaction (tx: TransactionRequest): Promise<TransactionResponse> {
     const userOperation = await this.populateUserOperation(tx)
     userOperation.signature = await this.signUserOperation(userOperation)
-    return this.sendUserOperation(userOperation)
+    const [entryPoint] = await this.provider.getSupportedEntryPoints()
+    return this.sendUserOperation(userOperation, entryPoint)
   }
 
-  async sendUserOperation (userOperation: UserOperation): Promise<TransactionResponse> {
+  async sendUserOperation (userOperation: UserOperation, entryPoint: string): Promise<TransactionResponse> {
     assert(userOperation.signature != null, 'passed UserOperation is not signed', 'UNSUPPORTED_OPERATION', {
       operation: 'signer.sendUserOperation'
     })
-    return this.provider.send('eth_sendUserOperation', userOperation.toJSON())
+    console.log('eth_sendUserOperation', [userOperation.toJSON(), entryPoint])
+    return this.provider.send('eth_sendUserOperation', [userOperation.toJSON(), entryPoint])
   }
 
   async signUserOperation (userOperation: UserOperation): Promise<string> {
