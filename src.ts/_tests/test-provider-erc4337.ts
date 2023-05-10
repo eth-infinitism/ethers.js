@@ -13,6 +13,7 @@ import {
 } from '../index.js'
 
 import type { TransactionResponse } from "../index.js";
+import { hexToBytes } from '@noble/hashes/utils'
 
 function stall(duration: number): Promise<void> {
     return new Promise((resolve) => { setTimeout(resolve, duration); });
@@ -210,7 +211,8 @@ class SampleWalletInfo implements Erc4337WalletInfo {
         const userOpCopy = Object.assign({}, userOperation, { signature: '0x' })
         const userOpHash = await this.entryPoint.getUserOpHash(userOpCopy)
         console.log('userOpHash', userOpHash)
-        return wallet.signMessage(userOpHash)
+        console.log('userOpHashSTACKUP', userOpHashSTACKUP)
+        return wallet.signMessage(hexToBytes(userOpHash.replace('0x', '')))
     }
 
     signEip1271Message (_: string): Promise<string> {
