@@ -211,7 +211,6 @@ class SampleWalletInfo implements Erc4337WalletInfo {
         const userOpCopy = Object.assign({}, userOperation, { signature: '0x' })
         const userOpHash = await this.entryPoint.getUserOpHash(userOpCopy)
         console.log('userOpHash', userOpHash)
-        console.log('userOpHashSTACKUP', userOpHashSTACKUP)
         return wallet.signMessage(hexToBytes(userOpHash.replace('0x', '')))
     }
 
