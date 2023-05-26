@@ -12,6 +12,8 @@ import { assert, assertArgument } from '../utils/errors.js'
 import { resolveAddress } from '../address/checks.js'
 import { toBigInt } from '../utils/maths.js'
 import { Network } from './network.js'
+import { TransactionReceipt } from './provider.js'
+import { Contract, EventLog } from '../contract'
 
 // as seen in 'provider.ts' but using radix 16
 function toJson (value: null | bigint): null | string {
@@ -125,34 +127,40 @@ export interface Erc4337WalletInfo {
  * Connects to a {@link bundlerUrl} with a JsonRpcProvider
  */
 export class Erc4337Provider extends AbstractProvider {
-  jsonRpcProvider: JsonRpcProvider
+  bundlerRpcProvider: JsonRpcProvider
+  walletRpcProvider: JsonRpcProvider
+  ethereumRpcProvider: JsonRpcProvider
   signer: Erc4337Signer
 
   supportedEntryPoints?: string[]
 
   constructor (
-    readonly bundlerUrl: string,
+    readonly ethereumRpcUrl: string,
+    readonly bundlerRpcUrl: string,
+    readonly walletRpcUrl: string, // TODO: TBD: is this a possibility that the Wallet API will be on a different URL?
     readonly walletInfo: Erc4337WalletInfo,
     _network?: 'any' | Networkish
   ) {
     super(_network)
-    this.jsonRpcProvider = new JsonRpcProvider(bundlerUrl, _network, { batchMaxCount: 1 })
-    this.signer = new Erc4337Signer(walletInfo, this)
+    this.bundlerRpcProvider = new JsonRpcProvider(bundlerRpcUrl, _network, { batchMaxCount: 1 })
+    this.walletRpcProvider = new JsonRpcProvider(walletRpcUrl, _network, { batchMaxCount: 1 })
+    this.ethereumRpcProvider = new JsonRpcProvider(ethereumRpcUrl, _network, { batchMaxCount: 1 })
+    this.signer = new Erc4337Signer(this, walletInfo)
   }
 
   async send (method: string, params: Array<any> | Record<string, any>): Promise<any> {
     // TODO: intercept direct sending of methods ERC-4337 overrides
-    return this.jsonRpcProvider.send(method, params)
+    return this.ethereumRpcProvider.send(method, params)
   }
 
   // override AbstractProvider stub
   _detectNetwork (): Promise<Network> {
-    return this.jsonRpcProvider._detectNetwork()
+    return this.ethereumRpcProvider._detectNetwork()
   }
 
   // override AbstractProvider stub
   async _perform<T = any> (req: PerformActionRequest): Promise<T> {
-    return this.jsonRpcProvider._perform(req)
+    return this.ethereumRpcProvider._perform(req)
   }
 
   async getSigner (address?: number | string): Promise<Erc4337Signer> {
@@ -211,7 +219,7 @@ export class Erc4337Provider extends AbstractProvider {
     }
     const userOpCopy = new UserOperation(Object.assign({}, userOperation.toJSON(), { paymasterAndData }))
     userOpCopy.signature = await this.walletInfo.getSignatureForEstimateGas(userOpCopy)
-    return this.jsonRpcProvider.send('eth_estimateUserOperationGas', [userOpCopy, entryPoint])
+    return this.bundlerRpcProvider.send('eth_estimateUserOperationGas', [userOpCopy, entryPoint])
   }
 
   async getSupportedEntryPoints (): Promise<string[]> {
@@ -219,17 +227,120 @@ export class Erc4337Provider extends AbstractProvider {
     if (this.supportedEntryPoints != null) {
       return this.supportedEntryPoints
     }
-    const supportedEntryPoints = await this.jsonRpcProvider.send('eth_supportedEntryPoints', [])
+    const supportedEntryPoints = await this.bundlerRpcProvider.send('eth_supportedEntryPoints', [])
     this.supportedEntryPoints = supportedEntryPoints
     return supportedEntryPoints
   }
 
   async getUserOperation (userOpHash: string): Promise<any> {
-    return this.jsonRpcProvider.send('eth_getUserOperationByHash', [userOpHash])
+    return this.bundlerRpcProvider.send('eth_getUserOperationByHash', [userOpHash])
   }
 
   async getUserOperationReceipt (userOpHash: string): Promise<any> {
-    return this.jsonRpcProvider.send('eth_getUserOperationReceipt', [userOpHash])
+    return this.bundlerRpcProvider.send('eth_getUserOperationReceipt', [userOpHash])
+  }
+
+  // TODO
+  async getTransaction (transactionHash: string): Promise<null | TransactionResponse> {
+    return await super.getTransaction(transactionHash)
+  }
+
+  // TODO
+  async getTransactionReceipt (transactionHash: string): Promise<null | TransactionReceipt> {
+    const userOpHash = await transactionHash
+    const sender = await this.walletInfo.getAddress()
+    return await new Promise<TransactionReceipt>((resolve, reject) => {
+      new UserOperationEventListener(
+        resolve, reject, null /* this.entryPoint */, sender, userOpHash
+      ).start()
+    })
+  }
+}
+
+// TODO: do we still need this?
+const DEFAULT_TRANSACTION_TIMEOUT: number = 10000
+
+export class UserOperationEventListener {
+  resolved: boolean = false
+  boundListener: (this: any, ...param: any) => void
+
+  constructor (
+    readonly resolve: (t: TransactionReceipt) => void,
+    readonly reject: (reason?: any) => void,
+    readonly entryPoint: Contract | null,
+    readonly sender: string,
+    readonly userOpHash: string,
+    readonly nonce?: bigint,
+    readonly timeout?: number
+  ) {
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    this.boundListener = this.listenerCallback.bind(this)
+    setTimeout(() => {
+      this.stop()
+      this.reject(new Error('Timed out'))
+    }, this.timeout ?? DEFAULT_TRANSACTION_TIMEOUT)
+  }
+
+  start (): void {
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    const filter = this.entryPoint!.filters.UserOperationEvent(this.userOpHash)
+    // listener takes time... first query directly:
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    setTimeout(async () => {
+      const res = await this.entryPoint!.queryFilter(filter, 'latest')
+      if (res.length > 0) {
+        void this.listenerCallback(res[0])
+      } else {
+        this.entryPoint!.once(filter, this.boundListener)
+      }
+    }, 100)
+  }
+
+  stop (): void {
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    this.entryPoint?.off('UserOperationEvent', this.boundListener)
+  }
+
+  async listenerCallback (this: any, ...param: any): Promise<void> {
+    const event = param[param.length - 1] as EventLog
+    if (event.args == null) {
+      console.error('got event without args', event)
+      return
+    }
+    // TODO: can this happen? we register to event by userOpHash..
+    if (event.args.userOpHash !== this.userOpHash) {
+      console.log(`== event with wrong userOpHash: sender/nonce: event.${event.args.sender as string}@${event.args.nonce.toString() as string}!= userOp.${this.sender as string}@${parseInt(this.nonce?.toString())}`)
+      return
+    }
+
+    const transactionReceipt = await event.getTransactionReceipt()
+    // transactionReceipt.transactionHash = this.userOpHash
+    // debug('got event with status=', event.args.success, 'gasUsed=', transactionReceipt.gasUsed)
+
+    // before returning the receipt, update the status from the event.
+    // eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
+    if (!event.args.success) {
+      await this.extractFailureReason(transactionReceipt)
+    }
+    this.stop()
+    this.resolve(transactionReceipt)
+    this.resolved = true
+  }
+
+  async extractFailureReason (receipt: TransactionReceipt): Promise<void> {
+    // debug('mark tx as failed')
+    // receipt.status = 0
+    const revertReasonEvents = await this.entryPoint!.queryFilter(this.entryPoint!.filters.UserOperationRevertReason(this.userOpHash, this.sender), receipt.blockHash)
+    if (revertReasonEvents[0] != null) {
+      let message = (revertReasonEvents[0] as any).args.revertReason // TODO: why does Log have no 'args' param?
+      if (message.startsWith('0x08c379a0')) {
+        // Error(string)
+        // message = defaultAbiCoder.decode(['string'], '0x' + message.substring(10)).toString()
+      }
+      // debug(`rejecting with reason: ${message}`)
+      this.reject(new Error(`UserOp failed with reason: ${message}`)
+      )
+    }
   }
 }
 
@@ -237,10 +348,11 @@ export class Erc4337Signer extends AbstractSigner<Erc4337Provider> {
   _isCodeDeployed?: boolean
 
   constructor (
-    readonly walletInfo: Erc4337WalletInfo,
-    provider: Erc4337Provider
+    erc4337Provider: Erc4337Provider,
+    readonly walletInfo: Erc4337WalletInfo, // TODO: it's either a wallet RPC or a wallet info object, not both - decide
+
   ) {
-    super(provider)
+    super(erc4337Provider)
   }
 
   connect (provider: Provider | null): Signer {

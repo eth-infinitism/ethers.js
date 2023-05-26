@@ -234,9 +234,16 @@ describe("Sends UserOperation", function() {
     // const networkName = "goerli";
     for (const providerName of ['one']) {
         // const provider = getProvider(providerName, networkName);
-        const contractRunner = new JsonRpcProvider('https://rpc-mumbai.maticvigil.com')
+        const contractRunner = new JsonRpcProvider('http://localhost:8545')
+        // const contractRunner = new JsonRpcProvider('https://rpc-mumbai.maticvigil.com')
         const walletInfo = new SampleWalletInfo(contractRunner)
-        const provider = new Erc4337Provider('https://api.stackup.sh/v1/node/99a0e25254fab0ddf2c0b37c2e92fc41b2442d3ba77e1c6bb6b4fd998943baf9', walletInfo)
+        const provider = new Erc4337Provider(
+          'http://localhost:8545',
+          'http://localhost:3000/rpc',
+          '',
+          walletInfo
+        )
+        // const provider = new Erc4337Provider('https://api.stackup.sh/v1/node/99a0e25254fab0ddf2c0b37c2e92fc41b2442d3ba77e1c6bb6b4fd998943baf9', walletInfo)
         if (provider == null) { continue; }
 
         it(`tests sending: ${ providerName }`, async function() {
