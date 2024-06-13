@@ -113,6 +113,12 @@ export type {
     JsonRpcTransactionRequest,
 } from "./provider-jsonrpc.js";
 
+export {
+  Erc4337Provider, Erc4337Signer,
+  Erc4337WalletInfo, UserOperationGasEstimation,
+  UserOperation, UserOperationCalldata
+} from "./provider-erc4337.js"
+
 export type {
     WebSocketCreator, WebSocketLike
 } from "./provider-websocket.js";
